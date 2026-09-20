@@ -130,6 +130,29 @@ export default function VideoUploadAnalyzer({ cameraId, onAlertsChanged }) {
                 ) : (
                   <p className="mt-2 text-xs text-slate-600">None</p>
                 )}
+
+                {report.vehicle_tracks?.length > 0 && (
+                  <ul className="mt-3 max-h-64 space-y-1 overflow-y-auto pr-1">
+                    {report.vehicle_tracks.map((v) => (
+                      <li
+                        key={v.track_id}
+                        className="flex items-center justify-between rounded-md bg-slate-900 px-3 py-1.5 text-xs text-slate-300"
+                      >
+                        <span className="capitalize">
+                          {v.type} <span className="text-slate-500">· Track {v.track_id}</span>
+                        </span>
+                        <span className="text-slate-500">
+                          Plate:{' '}
+                          {v.plate ? (
+                            <span className="font-mono text-emerald-300">{v.plate}</span>
+                          ) : (
+                            <span className="text-slate-400">None</span>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               <div>
@@ -142,7 +165,7 @@ export default function VideoUploadAnalyzer({ cameraId, onAlertsChanged }) {
               </div>
             </div>
 
-            {report.vehicles?.length > 0 && (
+            {!report.vehicle_tracks?.length && report.vehicles?.length > 0 && (
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Vehicle plates read</h3>
                 <ul className="mt-2 space-y-1">

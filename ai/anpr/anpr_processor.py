@@ -12,9 +12,15 @@ _MIN_PLATE_LENGTH = 4
 
 
 class ANPRProcessor:
-    def __init__(self, scan_interval_frames: int = 3):
+    def __init__(self, scan_interval_frames: Optional[int] = None, max_candidates: int = 3):
         self._plate_detector = PlateDetector()
+        # Without the trained YOLO plate model the detector falls back to a
+        # contour heuristic that returns many false candidates, and every
+        # candidate costs a Tesseract call (100-500 ms). Scan less often then.
+        if scan_interval_frames is None:
+            scan_interval_frames = 3 if self._plate_detector.using_yolo else 8
         self._scan_interval_frames = max(1, int(scan_interval_frames))
+        self._max_candidates = max(1, int(max_candidates))
         self._last_scan: Dict[int, int] = {}
 
     @property
@@ -47,12 +53,15 @@ class ANPRProcessor:
         candidates = self._plate_detector.detect(vehicle_crop)
         if not candidates:
             return None
-        plate_crop = self._plate_detector.crop(vehicle_crop, candidates[0])
-        if plate_crop.size == 0:
-            return None
-        try:
-            text = read_plate(plate_crop)
-        except RuntimeError as exc:
-            log.warning("OCR failed: %s", exc)
-            return None
-        return text if len(text) >= _MIN_PLATE_LENGTH else None
+        for bbox in candidates[:self._max_candidates]:
+            plate_crop = self._plate_detector.crop(vehicle_crop, bbox)
+            if plate_crop.size == 0:
+                continue
+            try:
+                text = read_plate(plate_crop)
+            except RuntimeError as exc:
+                log.warning("OCR failed: %s", exc)
+                return None
+            if len(text) >= _MIN_PLATE_LENGTH:
+                return text
+        return None

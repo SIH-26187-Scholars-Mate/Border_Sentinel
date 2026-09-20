@@ -117,3 +117,51 @@ def test_empty_clip_reports_nothing_detected():
     report = analyzer.build_report(fps=25.0)
     assert report["object_counts"] == {}
     assert report["summary"] == "No objects were detected in this clip."
+
+
+def test_vehicle_tracks_list_plate_or_none_per_vehicle():
+    # Two vehicles far apart (two separate tracks) and one person. The fake
+    # ANPR only "reads" a plate for the first vehicle's crop.
+    class _PlateForLeftCarOnly:
+        def read_plate_for_vehicle(self, frame, bbox):
+            return "MH12AB1234" if bbox[0] < 250 else None
+
+    detector = _FakeDetector([
+        Detection("car", 0.9, (10, 50, 180, 200)),
+        Detection("truck", 0.9, (300, 50, 480, 200)),
+        Detection("person", 0.9, (200, 10, 230, 60)),
+    ])
+    analyzer = VideoReportAnalyzer(
+        detector=detector, face_detector=_NoFaces(), anpr_processor=_PlateForLeftCarOnly()
+    )
+    for _ in range(20):
+        analyzer.process_frame(_blank_frame(), fps=25.0)
+
+    report = analyzer.build_report(fps=25.0)
+    rows = {(v["type"], v["plate"]) for v in report["vehicle_tracks"]}
+    assert rows == {("car", "MH12AB1234"), ("truck", None)}
+    # People are not vehicles, so they never get a plate row.
+    assert all(v["type"] != "person" for v in report["vehicle_tracks"])
+
+
+def test_vehicle_gives_up_after_max_attempts_but_still_listed_as_none():
+    from ai.video import report_analyzer as ra
+
+    class _CountingANPR:
+        calls = 0
+
+        def read_plate_for_vehicle(self, frame, bbox):
+            _CountingANPR.calls += 1
+            return None
+
+    detector = _FakeDetector([Detection("car", 0.9, (50, 50, 250, 250))])
+    analyzer = VideoReportAnalyzer(
+        detector=detector, face_detector=_NoFaces(), anpr_processor=_CountingANPR()
+    )
+    for _ in range(200):
+        analyzer.process_frame(_blank_frame(), fps=25.0)
+
+    assert _CountingANPR.calls == ra.ANPR_MAX_ATTEMPTS_PER_TRACK
+    assert analyzer.build_report(fps=25.0)["vehicle_tracks"] == [
+        {"track_id": 1, "type": "car", "plate": None}
+    ]

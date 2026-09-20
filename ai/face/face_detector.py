@@ -31,8 +31,22 @@ BBox = Tuple[int, int, int, int]  # x, y, w, h
 class FaceDetector:
     """OpenCV Haar-based face detector tuned for CCTV/video frames."""
 
-    def __init__(self, min_face_size: int = 24):
+    def __init__(self, min_face_size: int = 24, detect_width: int = 640,
+                 use_profile: bool = True, use_secondary_frontal: bool = False):
+        """
+        detect_width: frames wider than this are DOWNSCALED to it before the
+            cascades run (cost is roughly proportional to pixel count).
+            Set to 0 to run at the frame's native size. Boxes are always
+            returned in the original frame's coordinates.
+        use_profile: also look for side-facing faces, but only on frames
+            where no frontal face was found (see detect()).
+        use_secondary_frontal: run the second (default) frontal cascade too.
+            Slightly better recall, roughly doubles frontal cost.
+        """
         self._min_face_size = max(16, int(min_face_size))
+        self._detect_width = max(0, int(detect_width))
+        self._use_profile = bool(use_profile)
+        self._use_secondary_frontal = bool(use_secondary_frontal)
         self._cascades = []
 
         data_path = getattr(getattr(cv2, "data", None), "haarcascades", None)
@@ -42,10 +56,9 @@ class FaceDetector:
 
         # The alt2 cascade is generally more selective than the default
         # frontal cascade; keeping both gives better coverage on CCTV frames.
-        cascade_names = (
-            "haarcascade_frontalface_alt2.xml",
-            "haarcascade_frontalface_default.xml",
-        )
+        cascade_names = ["haarcascade_frontalface_alt2.xml"]
+        if self._use_secondary_frontal:
+            cascade_names.append("haarcascade_frontalface_default.xml")
         for name in cascade_names:
             path = data_path + name
             cascade = cv2.CascadeClassifier(path)
@@ -56,12 +69,13 @@ class FaceDetector:
 
         # Profile detection catches side-facing people. We also run it on a
         # horizontally flipped image so both profile directions are covered.
-        profile_path = data_path + "haarcascade_profileface.xml"
-        profile = cv2.CascadeClassifier(profile_path)
-        if not profile.empty():
-            self._cascades.append((profile, True))
-        else:
-            log.warning("Could not load profile face cascade from %s", profile_path)
+        if self._use_profile:
+            profile_path = data_path + "haarcascade_profileface.xml"
+            profile = cv2.CascadeClassifier(profile_path)
+            if not profile.empty():
+                self._cascades.append((profile, True))
+            else:
+                log.warning("Could not load profile face cascade from %s", profile_path)
 
         if self._cascades:
             log.info("Loaded %d face cascades", len(self._cascades))
@@ -97,10 +111,11 @@ class FaceDetector:
 
     @staticmethod
     def _prepare(frame: np.ndarray, scale: float):
-        """Return an enlarged grayscale image with local contrast enhanced."""
+        """Return a (possibly resized) grayscale image with local contrast enhanced."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if scale != 1.0:
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=interp)
         # CLAHE helps when a CCTV camera has shadows or a bright background.
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
@@ -117,8 +132,8 @@ class FaceDetector:
             try:
                 found = cascade.detectMultiScale(
                     image,
-                    scaleFactor=1.08 if profile else 1.07,
-                    minNeighbors=5 if profile else 6,
+                    scaleFactor=1.15 if profile else 1.1,
+                    minNeighbors=4 if profile else 5,
                     minSize=(min_size, min_size),
                     flags=cv2.CASCADE_SCALE_IMAGE,
                 )
@@ -143,29 +158,25 @@ class FaceDetector:
 
         try:
             height, width = frame.shape[:2]
-            # Upscaling is important for CCTV faces that occupy only a small
-            # fraction of a 720p/1080p frame. Avoid excessive CPU cost on 4K.
-            max_dimension = max(height, width)
-            scale = 1.8 if max_dimension <= 1280 else 1.35
-            scale = min(scale, 2.0)
+            # Run at a bounded resolution: cascade cost grows with pixel
+            # count, so big frames are shrunk (never enlarged).
+            if self._detect_width and width > self._detect_width:
+                scale = self._detect_width / float(width)
+            else:
+                scale = 1.0
 
             gray = self._prepare(frame, scale)
             boxes = self._detect_pass(gray, scale, profile=False)
 
-            # Profile detection is deliberately secondary. It improves recall
-            # for side-facing subjects without making frontal detection overly
-            # permissive.
-            profile_gray = cv2.flip(gray, 1)
-            profile_boxes = self._detect_pass(profile_gray, scale, profile=True)
-            for x, y, w, h in profile_boxes:
-                x = int(gray.shape[1] - (x + w))
-                boxes.append((x, y, w, h))
-
-            # A second, unscaled pass is useful for very large close-up faces
-            # and avoids relying entirely on the enlarged image.
-            if not boxes:
-                original_gray = self._prepare(frame, 1.0)
-                boxes = self._detect_pass(original_gray, 1.0, profile=False)
+            # Profile (side-facing) detection is the expensive extra pass, so
+            # only pay for it when the frontal cascade found nobody. We also
+            # run it on a flipped image so both directions are covered.
+            if not boxes and self._use_profile:
+                profile_gray = cv2.flip(gray, 1)
+                for x, y, w, h in self._detect_pass(profile_gray, scale, profile=True):
+                    # _detect_pass already returns original-frame units, but
+                    # measured on the mirrored image: mirror x back.
+                    boxes.append((width - (x + w), y, w, h))
 
             valid: List[BBox] = []
             for x, y, w, h in boxes:

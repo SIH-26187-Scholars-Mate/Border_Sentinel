@@ -32,9 +32,14 @@ from ai.video.video_stream import VideoStream
 log = get_logger(__name__)
 
 VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle"}
-# Same cooldown Pipeline uses — don't re-run OCR on the same lingering
-# vehicle every single frame.
-ANPR_COOLDOWN_FRAMES = 60
+# Plate reading is per vehicle track: keep trying until a plate is read, but
+# not every frame (OCR is slow) and not forever (a vehicle that never shows a
+# readable plate is reported as plate "None").
+ANPR_RETRY_EVERY_FRAMES = 8
+ANPR_MAX_ATTEMPTS_PER_TRACK = 6
+# Vehicles narrower than this (in processed-frame pixels) are too small for
+# their plate to be legible, so don't spend OCR time on them.
+ANPR_MIN_VEHICLE_WIDTH_PX = 80
 
 
 class VideoReportAnalyzer:
@@ -49,7 +54,10 @@ class VideoReportAnalyzer:
         face_detector: Optional[FaceDetector] = None,
         activity_detector: Optional[ActivityDetector] = None,
         anpr_processor: Optional[ANPRProcessor] = None,
+        face_every_n: int = 1,
     ):
+        self._face_every_n = max(1, int(face_every_n))
+        self._last_face_found = False
         self._detector = detector if detector is not None else Detector()
         self._tracker = tracker if tracker is not None else CentroidTracker()
         self._face_detector = face_detector if face_detector is not None else FaceDetector()
@@ -58,7 +66,9 @@ class VideoReportAnalyzer:
         self._fence = VirtualFence(fence_polygon) if fence_polygon else None
 
         self._seen_tracks: Dict[int, str] = {}      # track_id -> class of its first sighting
-        self._anpr_last_emitted: Dict[int, int] = {}
+        self._track_plates: Dict[int, str] = {}      # vehicle track_id -> plate text read for it
+        self._anpr_attempts: Dict[int, int] = {}     # track_id -> OCR attempts made so far
+        self._anpr_last_try: Dict[int, int] = {}     # track_id -> frame index of last attempt
         self._seen_plates: Dict[str, float] = {}     # plate text -> first time seen (seconds)
         self._seen_plate_confidences: Dict[str, float] = {}  # plate text -> detector confidence at read time
         self._track_confidences: Dict[int, List[float]] = {}  # track_id -> confidence history
@@ -82,9 +92,15 @@ class VideoReportAnalyzer:
             return round(sum(self._all_confidences) / len(self._all_confidences), 2)
         return 0.0
 
-    def _anpr_can_emit(self, track_id: int) -> bool:
-        last = self._anpr_last_emitted.get(track_id)
-        return last is None or (self._frame_index - last) > ANPR_COOLDOWN_FRAMES
+    def _should_try_plate(self, track_id: int, bbox) -> bool:
+        if track_id in self._track_plates:
+            return False  # already have this vehicle's plate
+        if self._anpr_attempts.get(track_id, 0) >= ANPR_MAX_ATTEMPTS_PER_TRACK:
+            return False  # gave up: report "None" for this vehicle
+        if (bbox[2] - bbox[0]) < ANPR_MIN_VEHICLE_WIDTH_PX:
+            return False
+        last = self._anpr_last_try.get(track_id)
+        return last is None or (self._frame_index - last) >= ANPR_RETRY_EVERY_FRAMES
 
     def process_frame(self, frame: np.ndarray, fps: float) -> None:
         self._frame_index += 1
@@ -119,16 +135,23 @@ class VideoReportAnalyzer:
             detection = bbox_to_detection.get(bbox)
             if detection is None or detection.class_name not in VEHICLE_CLASSES:
                 continue
-            if not self._anpr_can_emit(track_id):
+            if not self._should_try_plate(track_id, bbox):
                 continue
             plate_text = self._anpr.read_plate_for_vehicle(frame, bbox)
-            self._anpr_last_emitted[track_id] = self._frame_index
+            self._anpr_attempts[track_id] = self._anpr_attempts.get(track_id, 0) + 1
+            self._anpr_last_try[track_id] = self._frame_index
             if not plate_text:
                 continue
+            self._track_plates[track_id] = plate_text
             self._seen_plates.setdefault(plate_text, self._time_s(fps))
             self._seen_plate_confidences.setdefault(plate_text, self._avg_confidence(track_id))
 
-        if self._face_detector.detect(frame):
+        # Face cascades are the slowest per-frame step; run them every Nth
+        # frame and carry the last answer over so faces_detected_frames still
+        # reflects how many frames had a face on screen.
+        if self._frame_index % self._face_every_n == 0 or self._frame_index == 1:
+            self._last_face_found = bool(self._face_detector.detect(frame))
+        if self._last_face_found:
             self._frames_with_face += 1
 
         class_by_id = {
@@ -169,6 +192,18 @@ class VideoReportAnalyzer:
         if self._activities:
             summary_bits.append(f"{len(self._activities)} suspicious activity event(s) were flagged.")
 
+        # One row per vehicle (car/truck/bus/motorcycle) with the plate read
+        # for it, or None when no plate could be read.
+        vehicle_tracks = [
+            {
+                "track_id": tid,
+                "type": cls,
+                "plate": self._track_plates.get(tid),
+            }
+            for tid, cls in sorted(self._seen_tracks.items())
+            if cls in VEHICLE_CLASSES
+        ]
+
         return {
             "frames_analyzed": self._frame_index,
             "duration_seconds": self._time_s(fps),
@@ -182,6 +217,7 @@ class VideoReportAnalyzer:
                 }
                 for plate, t in self._seen_plates.items()
             ],
+            "vehicle_tracks": vehicle_tracks,
             "faces_detected_frames": self._frames_with_face,
             "intrusions": self._intrusions,
             "activities": self._activities,
@@ -193,15 +229,19 @@ def analyze_video_file(
     path: str,
     fence_polygon: Optional[List[Tuple[float, float]]] = None,
     process_every_n: int = 1,
+    face_every_n: int = 3,
     **analyzer_kwargs,
 ) -> dict:
     """Opens `path`, runs every (sampled) frame through VideoReportAnalyzer,
     and returns the final report dict. Raises RuntimeError if the file
     can't be opened (bad path, corrupt/unsupported video, etc.)."""
-    analyzer = VideoReportAnalyzer(fence_polygon=fence_polygon, **analyzer_kwargs)
+    analyzer = VideoReportAnalyzer(fence_polygon=fence_polygon, face_every_n=face_every_n, **analyzer_kwargs)
     with VideoStream(path) as stream:
         fps = stream.fps() or 25.0
         processor = FrameProcessor(stream, process_every_n=process_every_n)
+        # analyzer counts processed frames, so when frames are skipped the
+        # effective rate is lower — otherwise reported timestamps are too small.
+        effective_fps = fps / max(1, process_every_n)
         for frame in processor.frames():
-            analyzer.process_frame(frame, fps)
-    return analyzer.build_report(fps)
+            analyzer.process_frame(frame, effective_fps)
+    return analyzer.build_report(effective_fps)

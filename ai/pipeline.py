@@ -8,6 +8,7 @@ created in the backend (via POST /cameras), since backend's ingest route
 expects a valid camera_id.
 """
 import json
+import os
 import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -38,6 +39,10 @@ VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle"}
 # fresh ANPR alert for the "same" track ID again (e.g. it re-enters frame).
 ANPR_COOLDOWN_FRAMES = 60
 
+# Set BS_PROFILE=1 to log the average time each stage takes per frame
+# (every 100 frames), so you can see what is actually limiting FPS.
+_PROFILE = os.getenv("BS_PROFILE") == "1"
+
 
 def _severity_for(activity: str) -> str:
     return {
@@ -55,6 +60,10 @@ class Pipeline:
         run_face: bool = True,
         run_activity: bool = True,
         run_anpr: bool = True,
+        # Run the (CPU-heavy) Haar face cascades only on every Nth frame and
+        # reuse the last result in between. Faces don't move far in 2-3
+        # frames, and this stage otherwise dominates per-frame time.
+        face_every_n: int = 3,
         # Dependency injection hooks — real objects are constructed by
         # default (and Detector() requires torch/ultralytics to be
         # installed), but tests can pass in fakes here to exercise the
@@ -102,6 +111,9 @@ class Pipeline:
         # intrusion/activity alerts can report a real average instead of a
         # fixed placeholder number.
         self._track_confidences: Dict[int, List[float]] = {}
+        self._stage_ms: Dict[str, float] = {}
+        self._face_every_n = max(1, int(face_every_n))
+        self._last_faces: list = []
         self._frame_index = 0
         self._last_zone_refresh = -9999
         self._fps_started = time.perf_counter()
@@ -204,6 +216,20 @@ class Pipeline:
             cv2.putText(frame, banner[:120], (12, 26), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
+    def _lap(self, stage: str, t0: float) -> float:
+        """Add the time since t0 to `stage` and return a fresh timestamp."""
+        now = time.perf_counter()
+        if _PROFILE:
+            self._stage_ms[stage] = self._stage_ms.get(stage, 0.0) + (now - t0) * 1000
+        return now
+
+    def _log_profile(self):
+        if not _PROFILE or self._frame_index % 100 != 0:
+            return
+        parts = ", ".join(f"{k}={v / 100:.0f}ms" for k, v in self._stage_ms.items())
+        log.info("Avg per frame over last 100: %s (measured fps=%.1f)", parts, self._fps)
+        self._stage_ms.clear()
+
     def process_frame(self, frame) -> dict:
         """Run AI and return a summary. The frame is annotated for the live preview."""
         self._frame_index += 1
@@ -214,7 +240,9 @@ class Pipeline:
 
         if self._frame_index - self._last_zone_refresh >= 60:
             self._refresh_zones(frame.shape)
+        t = time.perf_counter()
         detections: List[Detection] = self._detector.detect(frame)
+        t = self._lap("yolo", t)
         for detection in detections:
             name = str(detection.class_name).strip().lower() or "unknown"
             self._class_counts[name] = self._class_counts.get(name, 0) + 1
@@ -238,6 +266,7 @@ class Pipeline:
                 self._event_counts["intrusion"] = self._event_counts.get("intrusion", 0) + 1
                 summary["events"].append({"type": "intrusion", "track_id": track_id})
 
+        t = time.perf_counter()
         if self._anpr:
             for track_id, bbox in tracked.items():
                 detection = bbox_to_detection.get(bbox)
@@ -257,11 +286,17 @@ class Pipeline:
                 self._event_counts["anpr"] = self._event_counts.get("anpr", 0) + 1
                 summary["events"].append({"type": "anpr", "track_id": track_id, "plate": plate_text})
 
+        t = self._lap("anpr", t)
         if self._face_detector:
-            faces = self._face_detector.detect(frame)
-            if faces:
-                self._event_counts["face"] = self._event_counts.get("face", 0) + len(faces)
-                summary["events"].append({"type": "face", "count": len(faces)})
+            if self._frame_index % self._face_every_n == 0:
+                # Fresh detection: only these frames count as face events.
+                self._last_faces = self._face_detector.detect(frame)
+                if self._last_faces:
+                    self._event_counts["face"] = self._event_counts.get("face", 0) + len(self._last_faces)
+                    summary["events"].append({"type": "face", "count": len(self._last_faces)})
+            # Frames in between just redraw the most recent boxes.
+            faces = self._last_faces
+        t = self._lap("face", t)
 
         if self._activity_detector:
             class_by_id = {tid: bbox_to_detection.get(bbox).class_name for tid,bbox in tracked.items() if bbox_to_detection.get(bbox)}
@@ -273,6 +308,8 @@ class Pipeline:
                 summary["events"].append(event)
 
         self._draw_overlay(frame, detections, faces, summary["events"])
+        self._lap("other", t)
+        self._log_profile()
         return summary
 
     def _avg_confidence(self, track_id: int) -> float:
