@@ -97,3 +97,72 @@ The AI process now publishes the exact captured frames as an MJPEG stream so the
 If a camera is created with `stream_url=0` (or no stream URL), the dashboard uses this preview automatically. For an external browser-compatible stream, enter its HTTP/MJPEG/HLS URL instead. RTSP is not directly playable by normal browsers; convert RTSP to MJPEG/HLS/WebRTC first.
 
 Use `--no-preview` to disable the preview server.
+
+## Indian YOLOv8 plate detector — integrated
+
+The dedicated Indian YOLOv8 plate detector is now part of the production ANPR path.
+After downloading the model once:
+
+```bash
+python -m ai.anpr.download_plate_model
+```
+
+`ANPRProcessor` loads the model automatically and forces plate inference to CPU.
+Plate scans are throttled to every third processed frame per vehicle track. If
+the model is missing or cannot be loaded, the previous contour detector remains
+as a safe fallback so the camera worker does not crash.
+
+## Experimental Indian YOLOv8 plate detector (CPU-only test)
+
+A separate experiment has been added for testing a dedicated Indian number-plate
+YOLOv8 detector without changing the working ANPR pipeline. The current
+production `anpr/plate_detector.py` is intentionally unchanged.
+
+The experiment uses the two-stage approach:
+
+```text
+camera/video
+    -> existing YOLOv8n vehicle detector
+    -> vehicle crop
+    -> Indian YOLOv8 plate detector
+    -> plate bounding box
+```
+
+The plate model comes from the public `lavanyashree2805/yolov8-license-plate-india`
+project, which describes a YOLOv8 vehicle -> custom YOLOv8 plate pipeline for
+Indian vehicles. The model is downloaded separately and is not committed into
+this repository. This keeps the source repository lightweight and lets us
+benchmark the model on the actual deployment computer.
+
+### Download the experimental model
+
+From the project root:
+
+```bash
+python -m ai.anpr.download_plate_model
+```
+
+### Test the laptop/webcam on CPU
+
+```bash
+python -m ai.anpr.test_yolo_plate --source 0
+```
+
+The experiment explicitly uses `device="cpu"`. It reports approximate FPS and
+shows both vehicle and plate boxes.
+
+For a short video benchmark:
+
+```bash
+python -m ai.anpr.test_yolo_plate --source path/to/video.mp4 --frames 100 --output runtime/anpr-yolo-test.mp4
+```
+
+For an image:
+
+```bash
+python -m ai.anpr.test_yolo_plate --source path/to/image.jpg --output runtime/anpr-yolo-test.jpg
+```
+
+**Important:** this is an experiment only. It does not replace the current
+contour-based ANPR detector until we compare detection quality and CPU speed
+on real Border Sentinel footage.

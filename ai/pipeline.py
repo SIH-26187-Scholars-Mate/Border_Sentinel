@@ -246,7 +246,9 @@ class Pipeline:
                 if not self._anpr_can_emit(track_id):
                     continue
 
-                plate_text = self._anpr.read_plate_for_vehicle(frame, bbox)
+                plate_text = self._anpr.read_plate_for_vehicle(
+                    frame, bbox, track_id=track_id, frame_index=self._frame_index
+                )
                 if not plate_text:
                     continue
 
