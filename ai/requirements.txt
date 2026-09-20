@@ -1,0 +1,4 @@
+# AI module deps now live in one combined file at the project root — see
+# ../requirements.txt for why (single venv shared with backend/, no version
+# conflicts). This just delegates so old habits/tooling keep working.
+-r ../requirements.txt

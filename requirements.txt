@@ -1,0 +1,87 @@
+# Border Sentinel — one combined environment for backend/ + ai/.
+#
+# Both used to have their own venv + requirements.txt. They're merged here
+# because they're really one Python process tree: the backend spawns the AI
+# module as a child process (see backend/app/services/camera_worker.py), so
+# there's no real benefit to keeping them isolated — and the old split had
+# an actual version conflict (ai/requirements.txt capped pytest<9, backend's
+# pinned pytest==9.1.1). One venv, one install, no conflict.
+#
+# Set up once from the project root:
+#   python -m venv .venv
+#   source .venv/bin/activate        # .venv\Scripts\activate on Windows
+#   pip install -r requirements.txt
+#
+# backend/requirements.txt and ai/requirements.txt now just point here
+# (`-r ../requirements.txt`) so any old `pip install -r backend/requirements.txt`
+# muscle memory still works and installs the same combined set.
+
+# ── Backend (FastAPI + Supabase) — pinned, from a known-working install ────
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.1
+deprecation==2.1.0
+fastapi==0.141.1
+h11==0.16.0
+h2==4.4.1
+hpack==4.2.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.19
+multidict==6.7.1
+packaging==26.3
+postgrest==2.31.0
+propcache==0.5.2
+pycparser==3.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
+PyJWT==2.13.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+PyYAML==6.0.3
+realtime==2.31.0
+starlette==1.6.0
+storage3==2.31.0
+StrEnum==0.4.15
+supabase==2.31.0
+supabase-auth==2.31.0
+supabase-functions==2.31.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==15.0.1
+yarl==1.24.5
+# NOTE: was capped <9 in the old ai/requirements.txt, which conflicted with
+# this pin. 9.1.1 works fine for both test suites.
+pytest==9.1.1
+
+# ── AI module (OpenCV/YOLO/OCR) — everything backend doesn't already pull in.
+# fastapi/uvicorn/httpx/pydantic-settings/python-multipart/pytest are omitted
+# here on purpose: the AI module only ever needed loose ranges for them
+# (e.g. fastapi>=0.115,<1), and the pinned backend versions above already
+# satisfy every one of those ranges — no need to list them twice.
+#
+# torch is listed explicitly (and BEFORE ultralytics) so pip installs the
+# CPU-only build from PyTorch's own wheel index instead of the default
+# CUDA build from PyPI. The default build drags in ~10 separate
+# nvidia-*-cu12 packages (cuBLAS, cuDNN, cuFFT, etc.) — several GB of CUDA
+# runtime libraries meant for GPU inference, which is why requirements.txt
+# suddenly ballooned. The extra-index-url below only supplies torch/
+# torchvision; every other package above still resolves from normal PyPI.
+# If you DO have an NVIDIA GPU and want GPU-accelerated inference, delete
+# these two lines and let ultralytics pull the default CUDA build instead.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+opencv-python-headless==4.10.0.84
+ultralytics>=8.2,<9
+numpy>=1.26
+pytesseract>=0.3.10,<1

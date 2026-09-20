@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/*
+  Border Sentinel design tokens — "checkpoint at dusk."
+  A border operations room isn't a generic dark SaaS dashboard: it's a
+  night shift, sodium perimeter lighting, radar glow, desert terrain.
+  These overrides retint Tailwind's slate/sky/emerald scales in one place
+  so every page inherits the same palette without per-page class changes.
+
+    slate  -> night/surface neutrals (warm-tinted charcoal, not cold gray)
+    sky    -> primary accent: dusty terracotta/amber ("horizon" glow)
+    emerald-> secondary accent: muted signal teal ("live" state)
+  amber/orange/red keep their default meaning (severity) — untouched.
+*/
+@theme {
+  --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --color-slate-950: #10151f;
+  --color-slate-900: #1a2130;
+  --color-slate-800: #293245;
+  --color-slate-700: #3d4760;
+  --color-slate-600: #6b6459;
+  --color-slate-500: #8c8474;
+  --color-slate-400: #a79f8e;
+  --color-slate-300: #c7c0af;
+  --color-slate-200: #e2dccb;
+  --color-slate-100: #f2eee1;
+
+  --color-sky-950: #2b160a;
+  --color-sky-900: #47230f;
+  --color-sky-800: #6b3517;
+  --color-sky-700: #92471e;
+  --color-sky-600: #c05a25;
+  --color-sky-500: #d97a3e;
+  --color-sky-400: #e2a164;
+  --color-sky-300: #eec090;
+  --color-sky-200: #f6ddbb;
+
+  --color-emerald-950: #08211f;
+  --color-emerald-900: #0e332f;
+  --color-emerald-700: #1f5a52;
+  --color-emerald-600: #2b776c;
+  --color-emerald-400: #5fbdae;
+  --color-emerald-300: #8cd4c7;
+}
+
+/*
+  Light mode — "checkpoint at dawn."
+  Rather than re-theming every page, this mirrors the dark scale: each
+  numbered stop swaps with its counterpart (950<->100, 900<->200, ...), the
+  same trick Tailwind's own light/dark scales rely on. Every existing
+  bg-slate-950 / text-slate-100 / bg-sky-500 class in the app therefore
+  repaints automatically under html.light — no per-page class changes needed.
+*/
+html.light {
+  --color-slate-950: #f2eee1;
+  --color-slate-900: #e2dccb;
+  --color-slate-800: #c7c0af;
+  --color-slate-700: #a79f8e;
+  --color-slate-600: #8c8474;
+  --color-slate-500: #6b6459;
+  --color-slate-400: #3d4760;
+  --color-slate-300: #293245;
+  --color-slate-200: #1a2130;
+  --color-slate-100: #10151f;
+
+  --color-sky-950: #f6ddbb;
+  --color-sky-900: #eec090;
+  --color-sky-800: #e2a164;
+  --color-sky-700: #d97a3e;
+  --color-sky-600: #c05a25;
+  --color-sky-500: #92471e;
+  --color-sky-400: #6b3517;
+  --color-sky-300: #47230f;
+  --color-sky-200: #2b160a;
+
+  --color-emerald-950: #8cd4c7;
+  --color-emerald-900: #5fbdae;
+  --color-emerald-700: #2b776c;
+  --color-emerald-600: #1f5a52;
+  --color-emerald-400: #0e332f;
+  --color-emerald-300: #08211f;
+}
+
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+html {
+  background: var(--color-slate-950);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--color-slate-950);
+  font-feature-settings: "cv02", "cv03", "cv04";
+  transition: background-color 0.15s ease;
+}
+
+button,
+a,
+select,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
