@@ -21,8 +21,9 @@ Each folder also has its own README with more detail — this one is the
 - **Object detection & tracking** — YOLOv8 (nano) detection with centroid tracking and per-track confidence history
 - **Virtual fence / intrusion detection** — configurable polygon zone; alerts when a tracked object crosses into it
 - **ANPR** — vehicle detection → plate crop → OCR, debounced per track so the same vehicle doesn't spam alerts
-- **Face detection** — OpenCV Haar-cascade presence detection (detection only, not identification)
-- **Activity detection** — loitering, rapid movement, and wrong-direction heuristics from tracked centroid history
+- **Face detection** — OpenCV Haar-cascade presence detection; used automatically when the face-recognition models below are not installed
+- **Face recognition** — compares every face with enrolled reference photos (`ai/face/known_faces/authorized` and `watchlist`). A watchlist match raises a critical intrusion alert; a face that matches nobody raises a high "unrecognized person" intrusion alert once an authorized list exists. Setup: `python -m ai.face.download_face_models`, then add photos (see `ai/face/known_faces/README.md`). Photos are git-ignored because they are biometric data
+- **Activity detection** — loitering, rapid movement, and counter-flow (sustained movement against the camera's expected direction of travel, set with `FLOW_DIRECTION=right|left|up|down|none`) heuristics from tracked centroid history
 - **Evidence snapshots** — alerts carry an `image_url` pointing at the actual frame that triggered them, served from the camera's own preview server
 - **Live dashboard** — WebSocket-pushed alerts, camera list/detail pages, and a searchable/filterable Alerts queue with acknowledge + CSV export
 - **Recorded-video analysis** — upload a clip on the Analyze page and get back object/event counts plus an annotated preview

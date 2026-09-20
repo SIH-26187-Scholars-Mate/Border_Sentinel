@@ -62,7 +62,7 @@ I built and tested this by actually running it — not just writing code and ass
 **Verified with real, passing tests (13/13):**
 - `tracking/tracker.py` — ID stability across frames, new-object assignment, stale-track eviction
 - `intrusion/virtual_fence.py` — enter/exit/re-enter debouncing (fires exactly once per crossing, not once per frame inside the zone)
-- `activity/activity_detector.py` — rapid movement vs. loitering heuristics
+- `activity/activity_detector.py` — rapid movement, loitering and counter-flow heuristics (counter-flow = the object's centroid moved at least 40 px against the camera's expected direction over 8 frames; direction set by `FLOW_DIRECTION`)
 - `utils/backend_client.py` — request shape, alert_type mapping, error handling on bad responses (mocked HTTP, run via `pytest`)
 
 **Verified live, against a real running backend (not mocked):**
@@ -166,3 +166,21 @@ python -m ai.anpr.test_yolo_plate --source path/to/image.jpg --output runtime/an
 **Important:** this is an experiment only. It does not replace the current
 contour-based ANPR detector until we compare detection quality and CPU speed
 on real Border Sentinel footage.
+
+
+## Face recognition
+
+`face/face_recognizer.py` identifies faces by comparing them with enrolled photos.
+
+1. `python -m ai.face.download_face_models` (once; ~37 MB, OpenCV Zoo YuNet + SFace models, no extra pip packages).
+2. Add reference photos under `ai/face/known_faces/authorized/` (people allowed in) and/or `watchlist/` (people who must trigger an alert). Layout and tips: `ai/face/known_faces/README.md`. Restart the AI worker afterwards.
+3. Behaviour: YuNet finds faces, SFace turns each into a 128-number embedding, and cosine similarity >= 0.363 against an enrolled photo counts as the same person.
+
+| Face is… | Alert |
+|---|---|
+| a watchlist person | `intrusion`, **critical** — "Watchlist match … verify manually" |
+| nobody enrolled (and an authorized list exists) | `intrusion`, **high** — "Unrecognized person" (needs 2 consecutive sightings, once per tracked person) |
+| an authorized person | none |
+| too small to identify (<48 px) | none, labelled `FACE` |
+
+Without the model files the module logs a warning and the pipeline falls back to Haar face *detection*. Recognition on small, blurry or side-on CCTV faces is unreliable: treat results as "a human should check", not as proof.

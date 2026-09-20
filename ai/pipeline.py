@@ -17,10 +17,14 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from ai.activity.activity_detector import ActivityDetector
+from ai.activity.activity_detector import ActivityDetector, activity_description
 from ai.anpr.anpr_processor import ANPRProcessor
 from ai.detection.detector import Detection, Detector
 from ai.face.face_detector import FaceDetector
+from ai.face.face_recognizer import (
+    ALERT_COOLDOWN_FRAMES, AUTHORIZED, UNKNOWN, UNKNOWN_CONFIRMATIONS, WATCHLIST,
+    FaceMatch, FaceRecognizer, alert_for, track_for_face,
+)
 from ai.intrusion.virtual_fence import VirtualFence, polygon_for_frame
 from ai.tracking.tracker import CentroidTracker
 from ai.utils.backend_client import BackendClientError, send_detection, get_camera_zones
@@ -43,11 +47,17 @@ ANPR_COOLDOWN_FRAMES = 60
 # (every 100 frames), so you can see what is actually limiting FPS.
 _PROFILE = os.getenv("BS_PROFILE") == "1"
 
+# Face-recognition alert debouncing (values live in face_recognizer.py so the
+# recorded-video analyzer uses exactly the same rules).
+FACE_UNKNOWN_CONFIRMATIONS = UNKNOWN_CONFIRMATIONS
+FACE_ALERT_COOLDOWN_FRAMES = ALERT_COOLDOWN_FRAMES
+
 
 def _severity_for(activity: str) -> str:
     return {
         "rapid_movement": "medium",
-        "wrong_direction": "high",
+        "counter_flow": "high",
+        "wrong_direction": "high",  # legacy key
         "loitering": "low",
         "vehicle_loitering": "high",
     }.get(activity, "low")
@@ -71,6 +81,7 @@ class Pipeline:
         detector: Optional[Detector] = None,
         tracker: Optional[CentroidTracker] = None,
         face_detector: Optional[FaceDetector] = None,
+        face_recognizer: Optional[FaceRecognizer] = None,
         activity_detector: Optional[ActivityDetector] = None,
         anpr_processor: Optional[ANPRProcessor] = None,
         frame_callback=None,
@@ -94,6 +105,11 @@ class Pipeline:
         self._detector = detector if detector is not None else Detector()
         self._tracker = tracker if tracker is not None else CentroidTracker()
         self._face_detector = (face_detector if face_detector is not None else FaceDetector()) if run_face else None
+        # Recognition (who is this?) replaces plain Haar detection when its
+        # models are installed; otherwise the Haar detector keeps working.
+        self._face_recognizer = (
+            (face_recognizer if face_recognizer is not None else FaceRecognizer()) if run_face else None
+        )
         self._activity_detector = (
             activity_detector if activity_detector is not None else ActivityDetector()
         ) if run_activity else None
@@ -114,6 +130,11 @@ class Pipeline:
         self._stage_ms: Dict[str, float] = {}
         self._face_every_n = max(1, int(face_every_n))
         self._last_faces: list = []
+        self._last_matches: List[FaceMatch] = []
+        self._unknown_streak: Dict[object, int] = {}
+        self._face_alert_last: Dict[object, int] = {}
+        self._face_alerted_once: set = set()
+        self._authorized_tracks: set = set()
         self._frame_index = 0
         self._last_zone_refresh = -9999
         self._fps_started = time.perf_counter()
@@ -196,10 +217,19 @@ class Pipeline:
             pts = np.array(self._fence._polygon, dtype=np.int32)
             cv2.polylines(frame, [pts], True, (255, 80, 80), 2)
 
+        matches_by_box = {tuple(m.bbox): m for m in self._last_matches}
         for x, y, w, h in faces:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 200, 0), 2)
-            cv2.putText(frame, "FACE", (x, max(20, y - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2, cv2.LINE_AA)
+            match = matches_by_box.get((x, y, w, h))
+            color, text = (255, 200, 0), "FACE"
+            if match is not None:
+                text = match.label
+                if match.group == AUTHORIZED:
+                    color = (80, 200, 80)
+                elif match.group in (UNKNOWN, WATCHLIST):
+                    color = (60, 60, 255)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(frame, text, (x, max(20, y - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
 
         # Show the most useful AI events in a compact banner.
         event_text = [f"FPS {self._fps:.1f}"]
@@ -208,6 +238,8 @@ class Pipeline:
                 event_text.append(f"PLATE: {event['plate']}")
             elif event.get("type") == "intrusion":
                 event_text.append("INTRUSION")
+            elif event.get("type") == "face_alert":
+                event_text.append("WATCHLIST FACE" if event.get("kind") == "watchlist" else "UNRECOGNIZED PERSON")
             elif event.get("type") == "activity":
                 event_text.append(str(event.get("activity", "ACTIVITY")).upper())
         banner = "  |  ".join(event_text)
@@ -215,6 +247,61 @@ class Pipeline:
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 38), (20, 20, 20), -1)
             cv2.putText(frame, banner[:120], (12, 26), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, (255, 255, 255), 2, cv2.LINE_AA)
+
+    def _handle_face_matches(self, matches, tracked, bbox_to_detection, frame, summary) -> None:
+        """Turn face-recognition results into (debounced) intrusion alerts."""
+        class_by_id = {
+            tid: bbox_to_detection[bbox].class_name
+            for tid, bbox in tracked.items()
+            if bbox_to_detection.get(bbox)
+        }
+        has_authorized = self._face_recognizer.has_authorized_gallery
+        seen_unknown_keys = set()
+
+        for match in matches:
+            track_id = track_for_face(match.bbox, tracked, class_by_id)
+
+            if match.group == AUTHORIZED:
+                # A person we know: never alert "unknown" for their track,
+                # even if a later blurry frame fails to match.
+                if track_id is not None:
+                    self._authorized_tracks.add(track_id)
+                    self._unknown_streak.pop(("unknown", track_id), None)
+                continue
+
+            alert = alert_for(match, has_authorized)
+            if alert is None:
+                continue
+
+            if alert.kind == "watchlist":
+                key = ("watchlist", match.name)
+            else:
+                if track_id is not None and track_id in self._authorized_tracks:
+                    continue
+                key = ("unknown", track_id)
+                seen_unknown_keys.add(key)
+                self._unknown_streak[key] = self._unknown_streak.get(key, 0) + 1
+                if self._unknown_streak[key] < FACE_UNKNOWN_CONFIRMATIONS:
+                    continue
+                if track_id is not None and key in self._face_alerted_once:
+                    continue  # once per tracked person
+
+            last = self._face_alert_last.get(key)
+            if last is not None and (self._frame_index - last) <= FACE_ALERT_COOLDOWN_FRAMES:
+                continue
+            self._face_alert_last[key] = self._frame_index
+            if alert.kind == "unrecognized" and track_id is not None:
+                self._face_alerted_once.add(key)
+
+            self._report("intrusion", alert.severity, alert.confidence, alert.description, frame=frame)
+            counter = "face_watchlist" if alert.kind == "watchlist" else "face_unrecognized"
+            self._event_counts[counter] = self._event_counts.get(counter, 0) + 1
+            summary["events"].append({"type": "face_alert", "kind": alert.kind,
+                                      "name": match.name, "track_id": track_id})
+
+        # An unknown streak must be CONSECUTIVE: reset ones not seen this pass.
+        for key in [k for k in self._unknown_streak if k[0] == "unknown" and k not in seen_unknown_keys]:
+            self._unknown_streak.pop(key, None)
 
     def _lap(self, stage: str, t0: float) -> float:
         """Add the time since t0 to `stage` and return a fresh timestamp."""
@@ -287,10 +374,16 @@ class Pipeline:
                 summary["events"].append({"type": "anpr", "track_id": track_id, "plate": plate_text})
 
         t = self._lap("anpr", t)
-        if self._face_detector:
+        if self._face_detector or self._face_recognizer:
             if self._frame_index % self._face_every_n == 0:
                 # Fresh detection: only these frames count as face events.
-                self._last_faces = self._face_detector.detect(frame)
+                if self._face_recognizer is not None and self._face_recognizer.ready:
+                    self._last_matches = self._face_recognizer.identify(frame)
+                    self._last_faces = [m.bbox for m in self._last_matches]
+                    self._handle_face_matches(self._last_matches, tracked, bbox_to_detection, frame, summary)
+                elif self._face_detector:
+                    self._last_matches = []
+                    self._last_faces = self._face_detector.detect(frame)
                 if self._last_faces:
                     self._event_counts["face"] = self._event_counts.get("face", 0) + len(self._last_faces)
                     summary["events"].append({"type": "face", "count": len(self._last_faces)})
@@ -303,7 +396,7 @@ class Pipeline:
             for event in self._activity_detector.update(tracked, class_by_id):
                 severity = _severity_for(event["activity"])
                 self._report("activity", severity, self._avg_confidence(event["track_id"]),
-                             f"Track {event['track_id']} — {event['activity']}", frame=frame)
+                             f"Track {event['track_id']} — {activity_description(event['activity'])}", frame=frame)
                 self._event_counts["activity"] = self._event_counts.get("activity", 0) + 1
                 summary["events"].append(event)
 

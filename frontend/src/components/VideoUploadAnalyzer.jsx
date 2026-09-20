@@ -7,6 +7,20 @@ function getAiBaseUrl() {
   return `${window.location.protocol}//${window.location.hostname}:${port}`
 }
 
+// Plain-language names for activity keys sent by the AI service. The old
+// "wrong_direction" key is kept so previously saved reports still read well.
+const ACTIVITY_LABELS = {
+  counter_flow: 'Counter-flow movement (against expected direction of travel)',
+  wrong_direction: 'Counter-flow movement (against expected direction of travel)',
+  rapid_movement: 'Rapid movement',
+  loitering: 'Loitering',
+  vehicle_loitering: 'Vehicle loitering',
+}
+
+function activityLabel(key) {
+  return ACTIVITY_LABELS[key] || String(key).replace(/_/g, ' ')
+}
+
 function formatTime(seconds) {
   const s = Math.max(0, Math.round(seconds || 0))
   const m = Math.floor(s / 60)
@@ -162,6 +176,29 @@ export default function VideoUploadAnalyzer({ cameraId, onAlertsChanged }) {
                     ? `Visible in ${report.faces_detected_frames} frame(s)`
                     : 'None spotted'}
                 </p>
+
+                {report.face_identities?.recognition_active && (
+                  <ul className="mt-3 space-y-1">
+                    {report.face_identities.watchlist?.map((p) => (
+                      <li key={`w-${p.name}`} className="flex items-center justify-between rounded-md border border-red-900 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">
+                        <span>Watchlist match: {p.name}</span>
+                        <span>at {formatTime(p.time_seconds)}</span>
+                      </li>
+                    ))}
+                    {report.face_identities.unrecognized?.map((p, i) => (
+                      <li key={`u-${i}`} className="flex items-center justify-between rounded-md border border-amber-900 bg-amber-950/30 px-3 py-1.5 text-xs text-amber-300">
+                        <span>Unrecognized person{p.track_id != null ? ` (track ${p.track_id})` : ''}</span>
+                        <span>at {formatTime(p.time_seconds)}</span>
+                      </li>
+                    ))}
+                    {report.face_identities.authorized?.map((p) => (
+                      <li key={`a-${p.name}`} className="flex items-center justify-between rounded-md bg-slate-900 px-3 py-1.5 text-xs text-slate-300">
+                        <span>Recognized: <span className="text-emerald-300">{p.name}</span></span>
+                        <span className="text-slate-500">at {formatTime(p.time_seconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
 
@@ -203,7 +240,7 @@ export default function VideoUploadAnalyzer({ cameraId, onAlertsChanged }) {
                 <ul className="mt-2 space-y-1">
                   {report.activities.map((e, i) => (
                     <li key={i} className="flex items-center justify-between rounded-md border border-amber-900 bg-amber-950/30 px-3 py-1.5 text-xs text-amber-300">
-                      <span>Track {e.track_id} — {String(e.activity).replace(/_/g, ' ')}</span>
+                      <span>Track {e.track_id} — {activityLabel(e.activity)}</span>
                       <span>at {formatTime(e.time_seconds)}</span>
                     </li>
                   ))}

@@ -23,6 +23,10 @@ from ai.activity.activity_detector import ActivityDetector
 from ai.anpr.anpr_processor import ANPRProcessor
 from ai.detection.detector import Detection, Detector
 from ai.face.face_detector import FaceDetector
+from ai.face.face_recognizer import (
+    ALERT_COOLDOWN_FRAMES, AUTHORIZED, UNKNOWN_CONFIRMATIONS, WATCHLIST,
+    FaceRecognizer, alert_for, track_for_face,
+)
 from ai.intrusion.virtual_fence import VirtualFence
 from ai.tracking.tracker import CentroidTracker
 from ai.utils.logger import get_logger
@@ -55,8 +59,16 @@ class VideoReportAnalyzer:
         activity_detector: Optional[ActivityDetector] = None,
         anpr_processor: Optional[ANPRProcessor] = None,
         face_every_n: int = 1,
+        face_recognizer: Optional[FaceRecognizer] = None,
     ):
         self._face_every_n = max(1, int(face_every_n))
+        # Who-is-this recognition; inactive (plain detection) if models are missing.
+        self._recognizer = face_recognizer if face_recognizer is not None else FaceRecognizer()
+        self._authorized_seen: Dict[str, float] = {}          # name -> first time seen (s)
+        self._watchlist_seen: Dict[str, dict] = {}            # name -> {time_seconds, confidence}
+        self._unrecognized: Dict[object, dict] = {}           # track_id (or bucket) -> {time_seconds, confidence}
+        self._authorized_tracks: set = set()
+        self._unknown_streak: Dict[object, int] = {}
         self._last_face_found = False
         self._detector = detector if detector is not None else Detector()
         self._tracker = tracker if tracker is not None else CentroidTracker()
@@ -146,19 +158,25 @@ class VideoReportAnalyzer:
             self._seen_plates.setdefault(plate_text, self._time_s(fps))
             self._seen_plate_confidences.setdefault(plate_text, self._avg_confidence(track_id))
 
-        # Face cascades are the slowest per-frame step; run them every Nth
-        # frame and carry the last answer over so faces_detected_frames still
-        # reflects how many frames had a face on screen.
-        if self._frame_index % self._face_every_n == 0 or self._frame_index == 1:
-            self._last_face_found = bool(self._face_detector.detect(frame))
-        if self._last_face_found:
-            self._frames_with_face += 1
-
         class_by_id = {
             tid: bbox_to_detection[bbox].class_name
             for tid, bbox in tracked.items()
             if bbox_to_detection.get(bbox)
         }
+
+        # Face work is the slowest per-frame step; run it every Nth frame and
+        # carry the last answer over so faces_detected_frames still reflects
+        # how many frames had a face on screen.
+        if self._frame_index % self._face_every_n == 0 or self._frame_index == 1:
+            if self._recognizer.ready:
+                matches = self._recognizer.identify(frame)
+                self._last_face_found = bool(matches)
+                self._record_face_identities(matches, tracked, class_by_id, fps)
+            else:
+                self._last_face_found = bool(self._face_detector.detect(frame))
+        if self._last_face_found:
+            self._frames_with_face += 1
+
         for event in self._activity_detector.update(tracked, class_by_id):
             self._activities.append({
                 "track_id": event["track_id"],
@@ -166,6 +184,41 @@ class VideoReportAnalyzer:
                 "time_seconds": self._time_s(fps),
                 "confidence": self._avg_confidence(event["track_id"]),
             })
+
+    def _record_face_identities(self, matches, tracked, class_by_id, fps: float) -> None:
+        """Collect who was recognised / not recognised, one entry per person."""
+        seen_unknown_keys = set()
+        has_authorized = self._recognizer.has_authorized_gallery
+        now = self._time_s(fps)
+        for match in matches:
+            track_id = track_for_face(match.bbox, tracked, class_by_id)
+            if match.group == AUTHORIZED:
+                self._authorized_seen.setdefault(match.name, now)
+                if track_id is not None:
+                    self._authorized_tracks.add(track_id)
+                    self._unknown_streak.pop(track_id, None)
+                continue
+            alert = alert_for(match, has_authorized)
+            if alert is None:
+                continue
+            if alert.kind == "watchlist":
+                entry = self._watchlist_seen.setdefault(
+                    match.name, {"time_seconds": now, "confidence": round(alert.confidence, 2)})
+                entry["confidence"] = max(entry["confidence"], round(alert.confidence, 2))
+                continue
+            # unrecognized person: needs consecutive confirmations, and never
+            # for a person already recognised as authorized on the same track.
+            if track_id is not None and track_id in self._authorized_tracks:
+                continue
+            # Faces we can't tie to a tracked person share a time bucket so a
+            # lingering unknown face isn't reported on every pass.
+            key = track_id if track_id is not None else f"untracked-{self._frame_index // ALERT_COOLDOWN_FRAMES}"
+            seen_unknown_keys.add(key)
+            self._unknown_streak[key] = self._unknown_streak.get(key, 0) + 1
+            if self._unknown_streak[key] >= UNKNOWN_CONFIRMATIONS and key not in self._unrecognized:
+                self._unrecognized[key] = {"time_seconds": now, "confidence": round(alert.confidence, 2)}
+        for key in [k for k in self._unknown_streak if k not in seen_unknown_keys]:
+            self._unknown_streak.pop(key, None)
 
     def build_report(self, fps: float) -> dict:
         object_counts = dict(Counter(self._seen_tracks.values()))
@@ -187,6 +240,14 @@ class VideoReportAnalyzer:
             summary_bits.append(f"{len(self._seen_plates)} vehicle plate(s) read: {plates}.")
         if self._frames_with_face:
             summary_bits.append(f"A face was visible in {self._frames_with_face} frame(s).")
+        if self._recognizer.ready:
+            if self._authorized_seen:
+                summary_bits.append("Recognized: " + ", ".join(self._authorized_seen) + ".")
+            if self._watchlist_seen:
+                summary_bits.append("WATCHLIST match: " + ", ".join(self._watchlist_seen) + " (verify manually).")
+            if self._unrecognized:
+                n = len(self._unrecognized)
+                summary_bits.append(f"{n} unrecognized person{'s' if n != 1 else ''} (not in the authorized list).")
         if self._intrusions:
             summary_bits.append(f"{len(self._intrusions)} intrusion event(s) into the restricted zone were flagged.")
         if self._activities:
@@ -217,6 +278,15 @@ class VideoReportAnalyzer:
                 }
                 for plate, t in self._seen_plates.items()
             ],
+            "face_identities": {
+                "recognition_active": self._recognizer.ready,
+                "authorized": [{"name": n, "time_seconds": t} for n, t in self._authorized_seen.items()],
+                "watchlist": [{"name": n, **info} for n, info in self._watchlist_seen.items()],
+                "unrecognized": [
+                    {"track_id": (k if isinstance(k, int) else None), **info}
+                    for k, info in self._unrecognized.items()
+                ],
+            },
             "vehicle_tracks": vehicle_tracks,
             "faces_detected_frames": self._frames_with_face,
             "intrusions": self._intrusions,

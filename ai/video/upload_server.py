@@ -34,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ai.utils.backend_client import BackendClientError, get_camera_zones, send_detection
 from ai.utils.logger import get_logger
+from ai.activity.activity_detector import activity_description
 from ai.video.report_analyzer import analyze_video_file
 
 log = get_logger(__name__)
@@ -96,12 +97,36 @@ def _persist_report(camera_id: str, report: dict) -> int:
         except BackendClientError as exc:
             log.warning("Could not save vehicle alert to backend: %s", exc)
 
+    faces = report.get("face_identities") or {}
+    for person in faces.get("watchlist", []):
+        try:
+            send_detection(
+                camera_id=camera_id, alert_type="intrusion", severity="critical",
+                confidence=person.get("confidence", 0.75),
+                description=f"Watchlist match: face resembles '{person['name']}' at {person['time_seconds']}s — verify manually (uploaded clip)",
+                source="video_analysis",
+            )
+            saved += 1
+        except BackendClientError as exc:
+            log.warning("Could not save watchlist alert to backend: %s", exc)
+    for person in faces.get("unrecognized", []):
+        try:
+            send_detection(
+                camera_id=camera_id, alert_type="intrusion", severity="high",
+                confidence=person.get("confidence", 0.75),
+                description=f"Unrecognized person (not in authorized list) at {person['time_seconds']}s (uploaded clip)",
+                source="video_analysis",
+            )
+            saved += 1
+        except BackendClientError as exc:
+            log.warning("Could not save unrecognized-person alert to backend: %s", exc)
+
     for activity in report.get("activities", []):
         try:
             send_detection(
                 camera_id=camera_id, alert_type="activity", severity="medium",
                 confidence=activity.get("confidence", 0.75),
-                description=f"Track {activity['track_id']} — {activity['activity']} at {activity['time_seconds']}s (uploaded clip)",
+                description=f"Track {activity['track_id']} — {activity_description(activity['activity'])} at {activity['time_seconds']}s (uploaded clip)",
                 source="video_analysis",
             )
             saved += 1

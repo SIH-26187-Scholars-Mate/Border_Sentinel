@@ -8,3 +8,12 @@ node_modules/
 dist/
 runtime/
 *.pt
+
+# Face recognition: reference photos are biometric data — never commit them.
+# (folders are kept via .gitkeep; README stays tracked)
+ai/face/known_faces/authorized/*
+!ai/face/known_faces/authorized/.gitkeep
+ai/face/known_faces/watchlist/*
+!ai/face/known_faces/watchlist/.gitkeep
+# downloaded model weights
+*.onnx
