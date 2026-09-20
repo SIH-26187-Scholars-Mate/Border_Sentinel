@@ -16,13 +16,16 @@ camera.
 This is intentionally simple otherwise: no live MJPEG preview, no shared
 preview ports, no dependency on a live camera worker being up. Upload ->
 process in a background thread -> poll for the finished report, which is
-saved to the dashboard as it's produced.
+saved to the dashboard as it's produced. The background thread keeps
+running even if the browser navigates away or is closed — /api/video/jobs
+and /api/video/jobs/{job_id} let the frontend reconnect to it later.
 """
 from __future__ import annotations
 
 import os
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
@@ -122,7 +125,12 @@ class AnalysisService:
                 done = [k for k, v in self.jobs.items() if v["status"] in {"completed", "failed"}]
                 for old_id in done[: max(1, len(done) - self.max_jobs + 1)]:
                     self.jobs.pop(old_id, None)
-            self.jobs[job_id] = {"status": "processing", "filename": path.name, "camera_id": camera_id}
+            self.jobs[job_id] = {
+                "status": "processing",
+                "filename": path.name,
+                "camera_id": camera_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
 
         threading.Thread(target=self._run, args=(path, job_id, camera_id), daemon=True).start()
 
@@ -132,14 +140,20 @@ class AnalysisService:
             report = analyze_video_file(str(path), fence_polygon=fence_polygon)
             saved = _persist_report(camera_id, report)
             with self.lock:
+                created_at = self.jobs.get(job_id, {}).get("created_at")
                 self.jobs[job_id] = {
                     "status": "completed", "filename": path.name, "camera_id": camera_id,
+                    "created_at": created_at,
                     "report": report, "alerts_saved": saved,
                 }
         except Exception as exc:
             log.exception("Video analysis failed for job %s", job_id)
             with self.lock:
-                self.jobs[job_id] = {"status": "failed", "filename": path.name, "camera_id": camera_id, "error": str(exc)}
+                created_at = self.jobs.get(job_id, {}).get("created_at")
+                self.jobs[job_id] = {
+                    "status": "failed", "filename": path.name, "camera_id": camera_id,
+                    "created_at": created_at, "error": str(exc),
+                }
         finally:
             try:
                 path.unlink(missing_ok=True)
@@ -149,6 +163,27 @@ class AnalysisService:
     def get(self, job_id: str):
         with self.lock:
             return self.jobs.get(job_id)
+
+    def list_summaries(self):
+        """Lightweight history for the Analyze page's "Recent analyses"
+        list — just enough to show what was analyzed, on which camera, and
+        when. Not the full report (fetch a specific job_id for that).
+        Bounded to the same in-memory jobs dict as everything else here, so
+        this resets if the AI service restarts and only covers the last
+        max_jobs runs."""
+        with self.lock:
+            items = [
+                {
+                    "job_id": job_id,
+                    "camera_id": job.get("camera_id"),
+                    "filename": job.get("filename"),
+                    "created_at": job.get("created_at"),
+                    "status": job.get("status"),
+                }
+                for job_id, job in self.jobs.items()
+            ]
+        items.sort(key=lambda j: j["created_at"] or "", reverse=True)
+        return items
 
 
 def create_upload_app() -> FastAPI:
@@ -197,6 +232,12 @@ def create_upload_app() -> FastAPI:
 
         service.start(destination, job_id, camera_id)
         return {"job_id": job_id, "status": "processing", "filename": video.filename}
+
+    @app.get("/api/video/jobs")
+    def list_jobs():
+        """History list for the Analyze page — camera, filename, timestamp,
+        status for every job this service remembers. Not the full report."""
+        return {"jobs": service.list_summaries()}
 
     @app.get("/api/video/jobs/{job_id}")
     def job_status(job_id: str):

@@ -122,9 +122,9 @@ class VideoReportAnalyzer:
             if not self._anpr_can_emit(track_id):
                 continue
             plate_text = self._anpr.read_plate_for_vehicle(frame, bbox)
+            self._anpr_last_emitted[track_id] = self._frame_index
             if not plate_text:
                 continue
-            self._anpr_last_emitted[track_id] = self._frame_index
             self._seen_plates.setdefault(plate_text, self._time_s(fps))
             self._seen_plate_confidences.setdefault(plate_text, self._avg_confidence(track_id))
 
