@@ -16,6 +16,20 @@ Each folder also has its own README with more detail — this one is the
 
 ---
 
+## Current features
+
+- **Object detection & tracking** — YOLOv8 (nano) detection with centroid tracking and per-track confidence history
+- **Virtual fence / intrusion detection** — configurable polygon zone; alerts when a tracked object crosses into it
+- **ANPR** — vehicle detection → plate crop → OCR, debounced per track so the same vehicle doesn't spam alerts
+- **Face detection** — OpenCV Haar-cascade presence detection (detection only, not identification)
+- **Activity detection** — loitering, rapid movement, and wrong-direction heuristics from tracked centroid history
+- **Evidence snapshots** — alerts carry an `image_url` pointing at the actual frame that triggered them, served from the camera's own preview server
+- **Live dashboard** — WebSocket-pushed alerts, camera list/detail pages, and a searchable/filterable Alerts queue with acknowledge + CSV export
+- **Recorded-video analysis** — upload a clip on the Analyze page and get back object/event counts plus an annotated preview
+- **Settings** — editable display name (synced to Supabase auth) and a light/dark theme toggle that applies across the whole console
+
+---
+
 ### Recorded-video history and persistence
 
 Uploaded-video analysis is persisted through the backend's Supabase `alerts` table. The AI service first finishes reading the entire video, then writes one history record per detected object class (plus face findings/events where applicable). These records are therefore visible from the dashboard/camera history and survive backend restarts.
@@ -187,4 +201,6 @@ The frontend is intentionally event-centric rather than rendering every camera s
 | Name | GitHub | Contribution |
 |---|---|---|
 | Prakash | [@Prakashsingh2007](https://github.com/Prakashsingh2007) | Development — backend, AI pipeline, frontend |
-| Nitish Solanki | [@Nitish6769](https://github.com/Nitish6769) | Ideas / planning / debugging|
+| Nitish Solanki | [@Nitish6769](https://github.com/Nitish6769) | Ideas / planning / debugging |
+| Parteek Jaiswal | [@Me-Parteek](https://github.com/Me-Parteek) | Virtual fencing improvements |
+| Nandini | [@nandinimaheshwari85-cell](https://github.com/nandinimaheshwari85-cell) | RTSP testing — running and validating the pipeline over a phone camera |
