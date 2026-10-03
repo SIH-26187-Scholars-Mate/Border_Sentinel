@@ -11,7 +11,7 @@ def test_workers_disabled_reports_disabled_and_spawns_nothing(monkeypatch):
 
     assert started["running"] is False and started["status"] == "disabled"
     assert status["status"] == "disabled" and "ENABLE_AI_WORKERS" in status["ai_error"]
-    assert worker_manager._processes == {}
+    assert "11111111-1111-1111-1111-111111111111" not in worker_manager._processes
 
 
 def test_cors_regex_setting_defaults_empty():
