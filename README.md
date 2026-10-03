@@ -163,6 +163,28 @@ If nothing shows up, check in this order:
 
 ---
 
+## Deploying (Render + Vercel + Supabase)
+
+Hosted layout: **Supabase** = database/auth, **Render** = FastAPI backend (REST + WebSocket),
+**Vercel** = React dashboard. The **AI module is not hosted** — it needs a camera and torch/YOLO,
+so it runs on the machine with the camera and posts alerts to the hosted backend.
+
+1. **Supabase** — run `backend/supabase_schema.sql`; under Authentication -> URL Configuration set
+   *Site URL* to your Vercel URL and add `https://<your-app>.vercel.app/auth/callback` to *Redirect URLs*.
+2. **Render** — New -> Blueprint -> this repo (uses `render.yaml`). Fill the env vars it asks for
+   (`SUPABASE_*`, `SUPABASE_JWKS_URL`, `AI_SERVICE_KEY`, `CORS_ORIGINS`). `ENABLE_AI_WORKERS` stays `false`.
+   Check `https://<service>.onrender.com/health`.
+3. **Vercel** — import the repo, set *Root Directory* = `frontend`, and add env vars
+   `VITE_BACKEND_URL` (Render URL), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Deploy, then put the
+   resulting URL into Render's `CORS_ORIGINS` and redeploy the backend.
+4. **AI on your machine** — in `ai/.env` set `BACKEND_URL=https://<service>.onrender.com` and
+   `SERVICE_KEY=<same value as Render's AI_SERVICE_KEY>`, then run
+   `python -m ai.main --camera-id <camera-id>`; alerts appear live on the Vercel dashboard.
+
+Hosted limitations: the dashboard's Start/Stop camera buttons, the live MJPEG preview and the Analyze
+upload page talk directly to the local AI process, so they only work when the dashboard runs on the
+same machine/network as the AI module (local dev). Render's free tier sleeps after ~15 min idle.
+
 ## Honest status (read this before assuming everything "just works")
 
 - Backend: fully tested, 34/34 automated tests passing, real Supabase auth

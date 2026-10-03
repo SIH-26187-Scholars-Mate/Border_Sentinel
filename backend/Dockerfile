@@ -6,7 +6,7 @@ FROM python:3.12-slim AS builder
 WORKDIR /build
 
 # Install dependencies first (layer-cached unless requirements.txt changes)
-COPY requirements.txt .
+COPY requirements-render.txt requirements.txt
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip --quiet \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt --quiet
@@ -28,17 +28,14 @@ COPY app/ ./app/
 # Make venv the default Python
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    ENABLE_AI_WORKERS=false
 
 USER appuser
 
 EXPOSE 8000
 
 # Bind to 0.0.0.0 so the port is reachable from outside the container.
-# Workers=1 keeps the in-memory store consistent; scale horizontally
-# with a real DB in production.
-CMD ["uvicorn", "app.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "1", \
-     "--log-level", "info"]
+# Workers=1: the WebSocket broadcast manager is per-process. PORT is injected
+# by hosts such as Render/Railway; falls back to 8000.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info"]

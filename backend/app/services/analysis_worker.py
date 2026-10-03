@@ -44,7 +44,13 @@ class AnalysisServiceManager:
         self._lock = RLock()
         self._root = Path(__file__).resolve().parents[3]
         self._log_dir = self._root / "runtime" / "ai-logs"
-        self._log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Read-only / non-root container layout: fall back to a temp dir
+            # instead of crashing the whole backend at import time.
+            self._log_dir = Path(tempfile.gettempdir()) / "border-sentinel-ai-logs"
+            self._log_dir.mkdir(parents=True, exist_ok=True)
 
     def _python_executable(self) -> str:
         explicit = os.environ.get("BORDER_SENTINEL_AI_PYTHON")

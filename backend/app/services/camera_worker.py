@@ -12,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from threading import RLock
@@ -52,11 +53,28 @@ class CameraWorkerManager:
         self._lock = RLock()
         self._root = Path(__file__).resolve().parents[3]
         self._log_dir = self._root / "runtime" / "ai-logs"
-        self._log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Read-only / non-root container layout: fall back to a temp dir
+            # instead of crashing the whole backend at import time.
+            self._log_dir = Path(tempfile.gettempdir()) / "border-sentinel-ai-logs"
+            self._log_dir.mkdir(parents=True, exist_ok=True)
         self._last_errors: dict[str, str] = {}
 
     def _preview_port(self, camera_number: int) -> int:
         return get_settings().ai_preview_base_port + int(camera_number)
+
+    def _disabled_state(self, camera_number: int) -> dict:
+        return {
+            "running": False,
+            "status": "disabled",
+            "ai_error": (
+                "AI workers are disabled on this server (ENABLE_AI_WORKERS=false). "
+                "Run the AI module on the machine that has the camera and point it at this backend."
+            ),
+            "preview_port": self._preview_port(camera_number),
+        }
 
     def _source(self, stream_url: Optional[str]) -> str:
         # Blank/null source intentionally means the local laptop webcam.
@@ -98,6 +116,8 @@ class CameraWorkerManager:
 
     def start(self, camera_id: UUID | str, camera_number: int, stream_url: Optional[str]) -> dict:
         key = str(camera_id)
+        if not get_settings().enable_ai_workers:
+            return self._disabled_state(camera_number)
         with self._lock:
             existing = self._processes.get(key)
             if existing is not None and existing.poll() is None:
@@ -205,6 +225,8 @@ class CameraWorkerManager:
 
     def status(self, camera_id: UUID | str, camera_number: int) -> dict:
         key = str(camera_id)
+        if not get_settings().enable_ai_workers:
+            return self._disabled_state(camera_number)
         with self._lock:
             process = self._processes.get(key)
             if process is None:

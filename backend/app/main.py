@@ -44,7 +44,10 @@ async def lifespan(_app: FastAPI):
     _check_supabase()
     # The dashboard Analyze page needs a dedicated upload API. Start it with
     # the backend so users no longer need a separate terminal/process.
-    analysis_service_manager.start()
+    if settings.enable_ai_workers:
+        analysis_service_manager.start()
+    else:
+        log.info("ENABLE_AI_WORKERS=false — not starting local AI child processes (run the AI module on an edge machine).")
     try:
         yield
     finally:
@@ -61,10 +64,11 @@ app = FastAPI(
 )
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
-# In production, replace the wildcard origin with the real frontend URL.
+# In production set CORS_ORIGINS to the real frontend URL(s) (comma-separated).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+    allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
